@@ -1,192 +1,249 @@
-//file:noinspection GroovyAssignabilityCheck -> ignore
-plugins {
-    id 'eclipse'
-    id 'idea'
-    id 'maven-publish'
-    id 'net.neoforged.moddev' version '2.0.107'
+import org.gradle.plugins.ide.eclipse.model.internal.FileReferenceFactory
+
+import java.nio.file.Files
+import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
+
+buildscript {
+	repositories {
+		maven { url = 'https://maven.ntmr.dev/proxy/' }
+		maven { url = 'https://maven.minecraftforge.net/' }
+		maven { url = 'https://plugins.gradle.org/m2' }
+		mavenCentral()
+	}
+	dependencies {
+		classpath ('com.anatawa12.forge:ForgeGradle:1.2-1.0.+') {changing = true}
+	}
 }
 
-tasks.named('wrapper', Wrapper).configure {
-    // Define wrapper values here so as to not have to always do so when updating gradlew.properties.
-    // Switching this to Wrapper.DistributionType.ALL will download the full gradle sources that comes with
-    // documentation attached on cursor hover of gradle classes and methods. However, this comes with increased
-    // file size for Gradle. If you do switch this to ALL, run the Gradle wrapper task twice afterwards.
-    // (Verify by checking gradle/wrapper/gradle-wrapper.properties to see if distributionUrl now points to `-all`)
-    distributionType = Wrapper.DistributionType.BIN
+apply plugin: 'forge'
+apply plugin: 'curseforge'
+apply plugin: 'maven-publish'
+
+
+if(Files.exists(Paths.get("curseforge.properties"))) {
+	// Load CurseForge configuration
+	ext.cfprops = parseConfig(file("curseforge.properties"))
 }
 
-version = mod_version
-group = mod_group
-
-base {
-    archivesName = mod_id
+if(Files.exists(Paths.get("maven.properties"))) {
+	ext.mavenprops = parseConfig(file("maven.properties"))
 }
 
-java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+def version_name = version = mod_version
+if(!mod_build_number.isEmpty()) {
+	version_name = mod_version + "_X" + mod_build_number
+	version = "[${version_name}]"
+}
+group = "com.hbm" // http://maven.apache.org/guides/mini/guide-naming-conventions.html
+archivesBaseName = "HBM-NTM"
+compileJava.options.encoding = 'UTF-8'
 
-neoForge {
-    // Specify the version of NeoForge to use.
-    version = project.neo_version
+sourceCompatibility = targetCompatibility = compileJava.sourceCompatibility = compileJava.targetCompatibility = '1.8'
 
-    parchment {
-        mappingsVersion = project.parchment_mappings_version
-        minecraftVersion = project.parchment_minecraft_version
-    }
-
-    // This line is optional. Access Transformers are automatically detected
-    // accessTransformers = project.files('src/main/resources/META-INF/accesstransformer.cfg')
-
-    // Default run configurations.
-    // These can be tweaked, removed, or duplicated as needed.
-    runs {
-        client {
-            client()
-
-            // Comma-separated list of namespaces to load gametests from. Empty = all namespaces.
-            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
-        }
-
-        server {
-            server()
-            programArgument '--nogui'
-            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
-        }
-
-        // This run config launches GameTestServer and runs all registered gametests, then exits.
-        // By default, the server will crash when no gametests are provided.
-        // The gametest system is also enabled by default for other run configs under the /test command.
-        gameTestServer {
-            type = "gameTestServer"
-            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
-        }
-
-        data {
-            data()
-
-            // example of overriding the workingDirectory set in configureEach above, uncomment if you want to use it
-            // gameDirectory = project.file('run-data')
-
-            // Specify the modid for data generation, where to output the resulting resource, and where to look for existing resources.
-            programArguments.addAll '--mod', project.mod_id, '--all', '--output', file('src/generated/resources/').getAbsolutePath(), '--existing', file('src/main/resources/').getAbsolutePath()
-        }
-
-        // applies to all the run configs above
-        configureEach {
-            // Recommended logging data for a userdev environment
-            // The markers can be added/remove as needed separated by commas.
-            // "SCAN": For mods scan.
-            // "REGISTRIES": For firing of registry events.
-            // "REGISTRYDUMP": For getting the contents of all registries.
-            systemProperty 'forge.logging.markers', 'REGISTRIES'
-
-            // Recommended logging level for the console
-            // You can set various levels here.
-            // Please read: https://stackoverflow.com/questions/2031163/when-to-use-the-different-log-levels
-            logLevel = org.slf4j.event.Level.DEBUG
-        }
-    }
-
-    mods {
-        // define mod <-> source bindings
-        // these are used to tell the game which sources are for which mod
-        // multi mod projects should define one per mod
-        "${mod_id}" {
-            sourceSet(sourceSets.main)
-        }
-    }
+minecraft {
+	version = "1.7.10-10.13.4.1614-1.7.10"
+	runDir = "eclipse"
 }
 
-// Include resources generated by data generators.
-sourceSets.main.resources { srcDir 'src/generated/resources' }
+// A little hack to fix codechicken's crazy maven structure (at least in 1.7.10)
+eclipse.classpath.file.whenMerged { cp ->
+	// Find all codechicken source jars
+	def srcent = cp.entries.findAll { entry -> entry.path.contains("codechicken") && entry.path.endsWith("-src.jar") }
 
-// Sets up a dependency configuration called 'localRuntime'.
-// This configuration should be used instead of 'runtimeOnly' to declare
-// a dependency that will be present for runtime testing but that is
-// "optional", meaning it will not be pulled by dependents of this mod.
-configurations {
-    runtimeClasspath.extendsFrom localRuntime
+	// Remove them from classpath
+	cp.entries.removeAll srcent
+
+	// Map the source entries to their dev counterparts based on basename
+	Map<String, File> srcmap = new HashMap<String, File>()
+	srcent.forEach { entry ->
+		def file = new File(entry.path)
+		srcmap.put(file.getName().replace("-src.jar", "-dev.jar"), file)
+	}
+
+	// Create file reference factory
+	def fileref = new FileReferenceFactory()
+
+	// Find all codechicken development jars
+	cp.entries.findAll { entry -> entry.path.contains("codechicken") && entry.path.endsWith("-dev.jar") }.forEach { entry ->
+		File srcmapping = new File(entry.path) // Initialize the srcmapping from the dev jar path
+		srcmapping = srcmap.get(srcmapping.getName()) // Transform it using the sourcemap
+		entry.sourcePath = fileref.fromFile(srcmapping) // Set the source path
+	}
 }
 
 repositories {
-    maven {
-        url "https://api.modrinth.com/maven"
-    }
-    maven {
-        url "https://maven.blamejared.com"
-    }
-    maven {
-        url "https://maven.caffeinemc.net/releases"
-    }
-    maven {
-        url "https://maven.ryanhcode.dev/releases"
-    }
+	maven {
+		name = 'Blerg'
+		url = 'https://maven.ntmr.dev/proxy/'
+	}
+	maven {
+		name = 'ModMaven'
+		url = 'https://modmaven.dev'
+	}
+	maven {
+		name = "gt"
+		url = "https://gregtech.mechaenetia.com/"
+	}
+	//maven {
+	//	name = "CurseForge"
+	//	url = "https://minecraft.curseforge.com/api/maven/"
+	//}
+	maven {
+		name = "Jitpack"
+		url = "https://jitpack.io"
+	}
+	maven {
+		name = "CurseMaven"
+		url = "https://cursemaven.com"
+	}
 }
 
 dependencies {
+	implementation('codechicken:CodeChickenCore:1.7.10-1.0.4.29:dev') { transitive = false }
+	compileOnly('codechicken:CodeChickenCore:1.7.10-1.0.4.29:src') { transitive = false }
 
-    // Sodium
-    compileOnly "net.caffeinemc:sodium-neoforge-api:${sodium_version}" // this is only API, install sodium by yourself
+	implementation('codechicken:CodeChickenLib:1.7.10-1.1.3.140:dev') { transitive = false }
+	compileOnly('codechicken:CodeChickenLib:1.7.10-1.1.3.140:src') { transitive = false }
 
-    // JEI
-    compileOnly "mezz.jei:jei-${minecraft_version}-neoforge-api:${jei_version}"
-    runtimeOnly "mezz.jei:jei-${minecraft_version}-neoforge:${jei_version}"
+	implementation('codechicken:NotEnoughItems:1.7.10-1.0.3.74:dev') { transitive = false }
+	compileOnly('codechicken:NotEnoughItems:1.7.10-1.0.3.74:src') { transitive = false }
 
-    // Sable companion
-    implementation "dev.ryanhcode.sable-companion:sable-companion-common-1.21.1:[${sable_companion_version},)"
+	compileOnly("inventorytweaks:InventoryTweaks:1.59-dev:deobf") { transitive = false }
 
-    // Sable itself
-    compileOnly "dev.ryanhcode.sable:sable-neoforge-1.21.1:2.0.3"
-    compileOnly "dev.ryanhcode.sable:sable-sable_rapier-1.21.1:2.0.3"
+	compileOnly("com.github.MightyPirates:OpenComputers:1.7.10-forge~1.8.9:api") { transitive = false }
 
-    // Iris
-    implementation "maven.modrinth:YL57xq9U:KduFYu4t"
+	compileOnly("com.github.GTNewHorizons:Applied-Energistics-2-Unofficial:rv3-beta.56-GTNH:dev") { transitive = false }
 }
 
-tasks.withType(ProcessResources).configureEach {
-    var replaceProperties = [
-            minecraft_version       : minecraft_version,
-            mod_description         : mod_description,
-            minecraft_version_range : minecraft_version_range,
-            neo_version             : neo_version,
-            neo_version_range       : neo_version_range,
-            loader_version_range    : loader_version_range,
-            mod_id                  : mod_id,
-            mod_name                : mod_name,
-            mod_license             : mod_license,
-            mod_version             : mod_version,
-            mod_authors             : mod_authors,
-    ]
+processResources {
+	// this will ensure that this task is redone when the versions change.
+	inputs.property "version", project.version
+	inputs.property "mcversion", project.minecraft.version
 
-    duplicatesStrategy = DuplicatesStrategy.WARN
+	// replace stuff in mcmod.info, nothing else
+	from(sourceSets.main.resources.srcDirs) {
+		include 'mcmod.info'
 
-    inputs.properties replaceProperties
+		// replace version and mcversion
+		filesMatching('mcmod.info') {
+			// replace version, mcversion and credits
+			expand([
+					version: version_name,
+					credits: project.credits
+			])
+		}
+	}
 
-    filesMatching("META-INF/neoforge.mods.toml") {
-        expand replaceProperties
+	// copy everything else, thats not the mcmod.info
+	from(sourceSets.main.resources.srcDirs) {
+		exclude 'mcmod.info'
+	}
+}
+
+// add AT to meta-inf
+jar {
+    manifest {
+        attributes 'FMLAT': 'HBM_at.cfg'
     }
 }
 
-publishing {
-    publications {
-        register('mavenJava', MavenPublication) {
-            from components.java
-        }
-    }
-    repositories {
-        maven {
-            url "file://${project.projectDir}/repo"
-        }
-    }
+task sourceJar(type: Jar) {
+	from sourceSets.main.allJava
+
+	classifier "src"
+
+	manifest {
+		attributes 'FMLAT': 'HBM_at.cfg'
+	}
 }
 
-tasks.withType(JavaCompile).configureEach {
-    options.encoding = 'UTF-8' // Use the UTF-8 charset for Java compilation
+task devJar(type: Jar) {
+	// hack: artificially depend on the reobf task here to get the normal jar to be overwritten before publishing
+	dependsOn reobf
+
+	from(sourceSets.main.output) {
+		include "**"
+	}
+	classifier "dev"
+
+	manifest {
+		attributes 'FMLAT': 'HBM_at.cfg'
+	}
 }
 
-// IDEA no longer automatically downloads sources/javadoc jars for dependencies, so we need to explicitly enable the behavior.
-idea {
-    module {
-        downloadSources = true
-        downloadJavadoc = true
-    }
+task version {
+	doFirst {
+		println project.version
+	}
+}
+
+if(Files.exists(Paths.get("curseforge.properties"))) {
+	curse {
+		apiKey = cfprops.api_key
+		projectId = cfprops.project_id
+		releaseType = "release"
+
+		displayName = "Hbm's Nuclear Tech Mod " + version_name.replace("_", "") + " for Minecraft 1.7.10"
+
+		gameVersions.addAll([
+				"Forge",
+				"Java 8",
+				"Client", "Server"
+		])
+
+		if (Files.exists(Paths.get("changelog"))) {
+			changelog = String.join("\r\n", Files.readAllLines(Paths.get("changelog")))
+
+			// Perform a backup of the changelog and create a new file for next changes
+			doLast {
+				Files.move(Paths.get("changelog"), Paths.get("changelog.bak"), StandardCopyOption.REPLACE_EXISTING)
+				Files.createFile(Paths.get("changelog"))
+			}
+		}
+	}
+}
+
+if(Files.exists(Paths.get("maven.properties"))) {
+	publishing {
+		publications {
+			release(MavenPublication) {
+				artifactId archivesBaseName
+				version version_name
+
+				artifact sourceJar {
+					classifier "src"
+				}
+
+				artifact devJar {
+					classifier "dev"
+				}
+
+				artifact jar
+			}
+		}
+		repositories {
+			maven {
+				name "Nuggies"
+				url "https://maven.ntmr.dev/releases"
+
+				credentials {
+					username mavenprops.username
+					password mavenprops.password
+				}
+				authentication {
+					basic(BasicAuthentication)
+				}
+			}
+		}
+	}
+}
+
+// Properties file parsing helper
+static def parseConfig(File config) {
+	config.withReader {
+		def prop = new Properties()
+		prop.load(it)
+		return (new ConfigSlurper().parse(prop))
+	}
 }
